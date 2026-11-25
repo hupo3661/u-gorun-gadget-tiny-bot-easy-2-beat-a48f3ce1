@@ -16,6 +16,10 @@ Exits (whole position, checked every bar):
     faded just short of the take-profit instead of holding it to the flat.
   - an RSI over 70 also exits (a bounce that ran hot)
 
+After an exit, a symbol is not bought again for 3 bars: right after a
+take-profit the gauges usually still read oversold, and re-buying at the
+higher price gives the bounce back. The pause lets the move settle.
+
 Sizing: each buy is min(equity / 7, the 25% weight cap's room, cash left in this
 reply), so all seven symbols can be bought on the same bar without ever
 over-spending the cash. Slippage is capped at 100 bps per order, so a fill
@@ -42,6 +46,7 @@ TRAIL_ARM = 101    # trailing exit arms once peak close >= 101% of entry close
 TRAIL_DROP = 995   # ... then a close at or under 99.5% of the peak sells
 MAX_SLIPPAGE_BPS = 100
 SLOTS = 7          # one seventh of equity per buy
+COOLDOWN_BARS = 3  # bars to wait before re-buying a symbol just sold
 
 
 class Series:
@@ -147,12 +152,15 @@ def on_batch(state, batch):
                            "max_slippage_bps": MAX_SLIPPAGE_BPS})
             ENTRIES.pop(symbol, None)
             PENDING.pop(symbol, None)
+            LAST_EXIT[symbol] = state.seq
 
     # Entries: deeply oversold on both gauges, on a symbol not held.
     cash_left = state.cash
     equity = state.equity
     for symbol in SYMBOLS:
         if symbol in state.positions or symbol in PENDING:
+            continue
+        if state.seq - LAST_EXIT.get(symbol, -999) < COOLDOWN_BARS:
             continue
         series = SERIES[symbol]
         rsi = series.rsi()
@@ -178,6 +186,9 @@ def on_batch(state, batch):
 # Decision close of a buy sent last bar, awaiting its fill; promoted to
 # ENTRIES once the fill lands (the trailing exit reads it from there).
 PENDING = {}
+# Held symbols: (entry close, peak close since entry).
 ENTRIES = {}
+# Last batch a symbol was sold on, for the re-buy cooldown.
+LAST_EXIT = {}
 
 makefun_bars.run(on_batch, on_hello=on_hello)

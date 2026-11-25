@@ -10,7 +10,10 @@ and never holds more than one seventh of equity per symbol.
 
 Exits (whole position, checked every bar):
   - take profit: position value >= 101% of its cost
-  - stop loss:   position value <= 75% of its cost
+  - stop loss:   position value <= 90% of its cost
+  - trailing exit: once the close has peaked at least 1% above the entry
+    close, a close 0.5% below that peak sells -- it banks a bounce that
+    faded just short of the take-profit instead of holding it to the flat.
   - an RSI over 70 also exits (a bounce that ran hot)
 
 Sizing: each buy is min(equity / 7, the 25% weight cap's room, cash left in this
@@ -34,7 +37,9 @@ RSI_EXIT_ABOVE = 70
 BAND_BARS = 20
 BAND_SIGMAS = 2.0
 TAKE_PROFIT = 101  # value >= 101% of cost
-STOP_LOSS = 75     # value <= 75% of cost
+STOP_LOSS = 90     # value <= 90% of cost
+TRAIL_ARM = 101    # trailing exit arms once peak close >= 101% of entry close
+TRAIL_DROP = 995   # ... then a close at or under 99.5% of the peak sells
 MAX_SLIPPAGE_BPS = 100
 SLOTS = 7          # one seventh of equity per buy
 
@@ -95,15 +100,17 @@ def on_hello(state):
 
 
 def on_batch(state, batch):
-    # A buy sent last bar resolved in this batch's fills: keep its decision
-    # close as the entry reference (the trailing exit needs it); a rejection
-    # drops the pending entry so the symbol can be bought again.
+    # A buy sent last bar resolved in this batch's fills: a fill promotes its
+    # decision close to the entry record (entry close, peak close) the
+    # trailing exit reads; a rejection drops the pending entry so the symbol
+    # can be bought again.
     for fill in batch.get("fills", []):
         if fill.get("side") != "buy":
             continue
         symbol = fill["symbol"]
         if fill.get("status") == "filled":
-            PENDING[symbol] = PENDING.get(symbol, state.close(symbol))
+            ref = PENDING.pop(symbol, state.close(symbol))
+            ENTRIES[symbol] = (ref, ref)
         else:
             PENDING.pop(symbol, None)
 
@@ -122,9 +129,20 @@ def on_batch(state, batch):
         series = SERIES[symbol]
         rsi = series.rsi()
         value = state.value(symbol, held.qty)
+        entry = ENTRIES.get(symbol)
+        trailing = False
+        if entry is not None:
+            ref, peak = entry
+            close = state.close(symbol)
+            if close is not None:
+                peak = close if close > peak else peak
+                ENTRIES[symbol] = (ref, peak)
+                trailing = (peak * 100 >= ref * TRAIL_ARM
+                            and close * 1000 <= peak * TRAIL_DROP)
         if (rsi is not None and rsi > RSI_EXIT_ABOVE
                 or value * 100 >= held.cost * TAKE_PROFIT
-                or value * 100 <= held.cost * STOP_LOSS):
+                or value * 100 <= held.cost * STOP_LOSS
+                or trailing):
             orders.append({"side": "sell", "symbol": symbol, "qty": held.qty,
                            "max_slippage_bps": MAX_SLIPPAGE_BPS})
             ENTRIES.pop(symbol, None)
